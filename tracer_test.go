@@ -1,11 +1,4 @@
-# pgxotel
-
-A OpenTelemetry collector for pgx
-
-## Getting Started
-
-```golang
-package main
+package pgxotel_test
 
 import (
 	"context"
@@ -15,7 +8,9 @@ import (
 	"github.com/pgx-contrib/pgxotel"
 )
 
-func main() {
+var count int
+
+func ExampleTracer() {
 	config, err := pgxpool.ParseConfig(os.Getenv("PGX_DATABASE_URL"))
 	if err != nil {
 		panic(err)
@@ -33,4 +28,3 @@ func main() {
 		panic(err)
 	}
 }
-```
