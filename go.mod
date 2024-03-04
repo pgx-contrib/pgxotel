@@ -3,7 +3,7 @@ module github.com/pgx-contrib/pgxotel
 go 1.22.0
 
 require (
-	github.com/jackc/pgx/v5 v5.5.3
+	github.com/jackc/pgx/v5 v5.5.4
 	go.opentelemetry.io/otel v1.24.0
 	go.opentelemetry.io/otel/trace v1.24.0
 )
