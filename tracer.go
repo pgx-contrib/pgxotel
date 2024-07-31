@@ -63,14 +63,9 @@ func (t *Tracer) TracePrepareStart(ctx context.Context, conn *pgx.Conn, data pgx
 		return ctx
 	}
 
-	opts := t.options(conn.Config())
-	// prepare the options
-	opts = append(opts,
-		trace.WithAttributes(
-			DBStatementName(data.SQL),
-			semconv.DBStatement(data.SQL),
-		),
-	)
+	opts := []trace.SpanStartOption{}
+	opts = append(opts, t.options(conn.Config())...)
+	opts = append(opts, t.query(data.SQL)...)
 
 	name := t.span("prepare", data.SQL)
 	// prepare the context
@@ -93,14 +88,9 @@ func (t *Tracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.T
 		return ctx
 	}
 
-	opts := t.options(conn.Config())
-	// prepare the options
-	opts = append(opts,
-		trace.WithAttributes(
-			DBStatementName(data.SQL),
-			semconv.DBStatement(data.SQL),
-		),
-	)
+	opts := []trace.SpanStartOption{}
+	opts = append(opts, t.options(conn.Config())...)
+	opts = append(opts, t.query(data.SQL)...)
 
 	name := t.span("query", data.SQL)
 	// prepare the context
@@ -178,14 +168,9 @@ func (t *Tracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data pgx.T
 
 // TraceBatchQuery implements pgx.BatchTracer.
 func (t *Tracer) TraceBatchQuery(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchQueryData) {
-	opts := t.options(conn.Config())
-	// prepare the options
-	opts = append(opts,
-		trace.WithAttributes(
-			DBStatementName(data.SQL),
-			semconv.DBStatement(data.SQL),
-		),
-	)
+	opts := []trace.SpanStartOption{}
+	opts = append(opts, t.options(conn.Config())...)
+	opts = append(opts, t.query(data.SQL)...)
 
 	name := t.span("batch query", data.SQL)
 	// prepare the context
@@ -210,6 +195,7 @@ func (t *Tracer) options(config *pgx.ConnConfig) []trace.SpanStartOption {
 			semconv.NetPeerName(config.Host),
 			semconv.NetPeerPort(int(config.Port)),
 			semconv.DBUser(config.User),
+			semconv.DBName(config.Database),
 		),
 	}
 }
@@ -230,6 +216,17 @@ func (q *Tracer) name(v string) string {
 	}
 
 	return "unknown"
+}
+
+func (q *Tracer) query(command string) []trace.SpanStartOption {
+	name := q.name(command)
+
+	return []trace.SpanStartOption{
+		trace.WithAttributes(
+			semconv.DBOperation(name),
+			semconv.DBStatement(command),
+		),
+	}
 }
 
 func (t *Tracer) error(span trace.Span, err error) {
@@ -258,9 +255,4 @@ func BatchSize(batch *pgx.Batch) attribute.KeyValue {
 func RowsAffected(tag pgconn.CommandTag) attribute.KeyValue {
 	const key = attribute.Key("pgx.query.rows_affected")
 	return key.Int64(tag.RowsAffected())
-}
-
-func DBStatementName(value string) attribute.KeyValue {
-	const key = attribute.Key("db.statement.name")
-	return key.String(value)
 }
