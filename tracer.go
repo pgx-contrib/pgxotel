@@ -67,9 +67,8 @@ func (t *Tracer) TracePrepareStart(ctx context.Context, conn *pgx.Conn, data pgx
 	opts = append(opts, t.options(conn.Config())...)
 	opts = append(opts, t.query(data.SQL)...)
 
-	name := t.span("prepare", data.SQL)
 	// prepare the context
-	ctx, _ = t.tracer.Start(ctx, name, opts...)
+	ctx, _ = t.tracer.Start(ctx, "prepare", opts...)
 	// done!
 	return ctx
 }
@@ -92,9 +91,8 @@ func (t *Tracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.T
 	opts = append(opts, t.options(conn.Config())...)
 	opts = append(opts, t.query(data.SQL)...)
 
-	name := t.span("query", data.SQL)
 	// prepare the context
-	ctx, _ = t.tracer.Start(ctx, name, opts...)
+	ctx, _ = t.tracer.Start(ctx, "query", opts...)
 	// done!
 	return ctx
 }
@@ -161,7 +159,7 @@ func (t *Tracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data pgx.T
 	)
 
 	// prepare the context
-	ctx, _ = t.tracer.Start(ctx, "batch start", opts...)
+	ctx, _ = t.tracer.Start(ctx, "batch", opts...)
 	// done!
 	return ctx
 }
@@ -172,9 +170,9 @@ func (t *Tracer) TraceBatchQuery(ctx context.Context, conn *pgx.Conn, data pgx.T
 	opts = append(opts, t.options(conn.Config())...)
 	opts = append(opts, t.query(data.SQL)...)
 
-	name := t.span("batch query", data.SQL)
 	// prepare the context
-	_, span := t.tracer.Start(ctx, name, opts...)
+	_, span := t.tracer.Start(ctx, "batch query", opts...)
+	defer span.End()
 	// done!
 	t.error(span, data.Err)
 }
