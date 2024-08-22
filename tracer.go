@@ -105,7 +105,7 @@ func (t *Tracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, data pgx.Tra
 	defer span.End()
 
 	if data.Err != nil {
-		span.SetAttributes(RowsAffected(data.CommandTag))
+		span.SetAttributes(DBRowsAffected(data.CommandTag))
 	}
 
 	// log the error
@@ -126,9 +126,8 @@ func (t *Tracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, data pg
 		),
 	)
 
-	name := "copy_from " + data.TableName.Sanitize()
 	// prepare the context
-	ctx, _ = t.tracer.Start(ctx, name, opts...)
+	ctx, _ = t.tracer.Start(ctx, "copy_from", opts...)
 	// done!
 	return ctx
 }
@@ -139,7 +138,7 @@ func (t *Tracer) TraceCopyFromEnd(ctx context.Context, conn *pgx.Conn, data pgx.
 	defer span.End()
 
 	if data.Err != nil {
-		span.SetAttributes(RowsAffected(data.CommandTag))
+		span.SetAttributes(DBRowsAffected(data.CommandTag))
 	}
 
 	// log the error
@@ -156,12 +155,12 @@ func (t *Tracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data pgx.T
 	// prepare the options
 	opts = append(opts,
 		trace.WithAttributes(
-			BatchSize(data.Batch),
+			DBOperationCount(data.Batch),
 		),
 	)
 
 	// prepare the context
-	ctx, _ = t.tracer.Start(ctx, "batch start", opts...)
+	ctx, _ = t.tracer.Start(ctx, "batch", opts...)
 	// done!
 	return ctx
 }
@@ -171,10 +170,13 @@ func (t *Tracer) TraceBatchQuery(ctx context.Context, conn *pgx.Conn, data pgx.T
 	opts := []trace.SpanStartOption{}
 	opts = append(opts, t.options(conn.Config())...)
 	opts = append(opts, t.query(data.SQL)...)
+	opts = append(opts, trace.WithAttributes(
+		DBRowsAffected(data.CommandTag),
+	))
 
-	name := t.span("batch query", data.SQL)
 	// prepare the context
-	_, span := t.tracer.Start(ctx, name, opts...)
+	_, span := t.tracer.Start(ctx, "batch_query", opts...)
+	defer span.End()
 	// done!
 	t.error(span, data.Err)
 }
@@ -194,6 +196,8 @@ func (t *Tracer) options(config *pgx.ConnConfig) []trace.SpanStartOption {
 		trace.WithAttributes(
 			semconv.NetPeerName(config.Host),
 			semconv.NetPeerPort(int(config.Port)),
+			// database attributes
+			semconv.DBSystemPostgreSQL,
 			semconv.DBUser(config.User),
 			semconv.DBName(config.Database),
 		),
@@ -239,20 +243,30 @@ func (t *Tracer) error(span trace.Span, err error) {
 				var pgerr *pgconn.PgError
 
 				if errors.As(err, &pgerr) {
-					const key = attribute.Key("pgx.sql_state")
-					span.SetAttributes(key.String(pgerr.Code))
+					span.SetAttributes(DBErrorCode(pgerr))
+					span.SetAttributes(DBErrorMessage(pgerr))
 				}
 			}
 		}
 	}
 }
 
-func BatchSize(batch *pgx.Batch) attribute.KeyValue {
-	const key = attribute.Key("pgx.batch.size")
-	return key.Int(batch.Len())
+func DBErrorCode(err *pgconn.PgError) attribute.KeyValue {
+	const key = attribute.Key("db.error_code")
+	return key.String(err.Code)
 }
 
-func RowsAffected(tag pgconn.CommandTag) attribute.KeyValue {
-	const key = attribute.Key("pgx.query.rows_affected")
+func DBErrorMessage(err *pgconn.PgError) attribute.KeyValue {
+	const key = attribute.Key("db.error_message")
+	return key.String(err.Message)
+}
+
+func DBRowsAffected(tag pgconn.CommandTag) attribute.KeyValue {
+	const key = attribute.Key("db.rows_affected")
 	return key.Int64(tag.RowsAffected())
+}
+
+func DBOperationCount(batch *pgx.Batch) attribute.KeyValue {
+	const key = attribute.Key("db.operation_count")
+	return key.Int(batch.Len())
 }
