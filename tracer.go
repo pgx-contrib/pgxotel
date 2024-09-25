@@ -25,15 +25,10 @@ var (
 
 // QueryTracer is a wrapper around the pgx tracer interfaces which instrument queries.
 type QueryTracer struct {
-	// tracer represents the tracer
-	tracer trace.Tracer
-}
-
-// NewQueryTracer creates a new tracer
-func NewQueryTracer(name string, options ...trace.TracerOption) *QueryTracer {
-	return &QueryTracer{
-		tracer: otel.GetTracerProvider().Tracer(name, options...),
-	}
+	// Name of the tracer
+	Name string
+	// Options to provide to the tracer
+	Options []trace.TracerOption
 }
 
 // TraceConnectStart implements pgx.ConnectTracer.
@@ -44,7 +39,7 @@ func (t *QueryTracer) TraceConnectStart(ctx context.Context, data pgx.TraceConne
 
 	opts := t.options(data.ConnConfig)
 	// prepare the span
-	ctx, _ = t.tracer.Start(ctx, "connect", opts...)
+	ctx, _ = t.tracer().Start(ctx, "connect", opts...)
 	// done!
 	return ctx
 }
@@ -69,7 +64,7 @@ func (t *QueryTracer) TracePrepareStart(ctx context.Context, conn *pgx.Conn, dat
 
 	name := t.span("prepare", data.SQL)
 	// prepare the context
-	ctx, _ = t.tracer.Start(ctx, name, opts...)
+	ctx, _ = t.tracer().Start(ctx, name, opts...)
 	// done!
 	return ctx
 }
@@ -94,7 +89,7 @@ func (t *QueryTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data 
 
 	name := t.span("query", data.SQL)
 	// prepare the context
-	ctx, _ = t.tracer.Start(ctx, name, opts...)
+	ctx, _ = t.tracer().Start(ctx, name, opts...)
 	// done!
 	return ctx
 }
@@ -127,7 +122,7 @@ func (t *QueryTracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, da
 	)
 
 	// prepare the context
-	ctx, _ = t.tracer.Start(ctx, "copy_from", opts...)
+	ctx, _ = t.tracer().Start(ctx, "copy_from", opts...)
 	// done!
 	return ctx
 }
@@ -160,7 +155,7 @@ func (t *QueryTracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data 
 	)
 
 	// prepare the context
-	ctx, _ = t.tracer.Start(ctx, "batch", opts...)
+	ctx, _ = t.tracer().Start(ctx, "batch", opts...)
 	// done!
 	return ctx
 }
@@ -175,7 +170,7 @@ func (t *QueryTracer) TraceBatchQuery(ctx context.Context, conn *pgx.Conn, data 
 	))
 
 	// prepare the context
-	_, span := t.tracer.Start(ctx, "batch_query", opts...)
+	_, span := t.tracer().Start(ctx, "batch_query", opts...)
 	defer span.End()
 	// done!
 	t.error(span, data.Err)
@@ -202,6 +197,11 @@ func (t *QueryTracer) options(config *pgx.ConnConfig) []trace.SpanStartOption {
 			semconv.DBName(config.Database),
 		),
 	}
+}
+
+func (q *QueryTracer) tracer() trace.Tracer {
+	// get the tracer
+	return otel.GetTracerProvider().Tracer(q.Name, q.Options...)
 }
 
 func (q *QueryTracer) span(prefix, command string) string {

@@ -16,7 +16,9 @@ func ExampleQueryTracer() {
 		panic(err)
 	}
 
-	config.ConnConfig.Tracer = pgxotel.NewQueryTracer("example-api")
+	config.ConnConfig.Tracer = &pgxotel.QueryTracer{
+		Name: "example-api",
+	}
 
 	conn, err := pgxpool.NewWithConfig(context.TODO(), config)
 	if err != nil {
