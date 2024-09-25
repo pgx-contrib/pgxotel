@@ -10,13 +10,13 @@ import (
 	"github.com/pgx-contrib/pgxotel"
 )
 
-func ExampleTracer() {
+func ExampleQueryTracer() {
 	config, err := pgxpool.ParseConfig(os.Getenv("PGX_DATABASE_URL"))
 	if err != nil {
 		panic(err)
 	}
 
-	config.ConnConfig.Tracer = pgxotel.NewTracer("example-api")
+	config.ConnConfig.Tracer = pgxotel.NewQueryTracer("example-api")
 
 	conn, err := pgxpool.NewWithConfig(context.TODO(), config)
 	if err != nil {

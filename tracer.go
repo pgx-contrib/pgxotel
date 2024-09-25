@@ -16,28 +16,28 @@ import (
 )
 
 var (
-	_ pgx.QueryTracer    = (*Tracer)(nil)
-	_ pgx.BatchTracer    = (*Tracer)(nil)
-	_ pgx.ConnectTracer  = (*Tracer)(nil)
-	_ pgx.PrepareTracer  = (*Tracer)(nil)
-	_ pgx.CopyFromTracer = (*Tracer)(nil)
+	_ pgx.QueryTracer    = (*QueryTracer)(nil)
+	_ pgx.BatchTracer    = (*QueryTracer)(nil)
+	_ pgx.ConnectTracer  = (*QueryTracer)(nil)
+	_ pgx.PrepareTracer  = (*QueryTracer)(nil)
+	_ pgx.CopyFromTracer = (*QueryTracer)(nil)
 )
 
-// Tracer is a wrapper around the pgx tracer interfaces which instrument queries.
-type Tracer struct {
+// QueryTracer is a wrapper around the pgx tracer interfaces which instrument queries.
+type QueryTracer struct {
 	// tracer represents the tracer
 	tracer trace.Tracer
 }
 
-// NewTracer creates a new tracer
-func NewTracer(name string, options ...trace.TracerOption) *Tracer {
-	return &Tracer{
+// NewQueryTracer creates a new tracer
+func NewQueryTracer(name string, options ...trace.TracerOption) *QueryTracer {
+	return &QueryTracer{
 		tracer: otel.GetTracerProvider().Tracer(name, options...),
 	}
 }
 
 // TraceConnectStart implements pgx.ConnectTracer.
-func (t *Tracer) TraceConnectStart(ctx context.Context, data pgx.TraceConnectStartData) context.Context {
+func (t *QueryTracer) TraceConnectStart(ctx context.Context, data pgx.TraceConnectStartData) context.Context {
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
@@ -50,7 +50,7 @@ func (t *Tracer) TraceConnectStart(ctx context.Context, data pgx.TraceConnectSta
 }
 
 // TraceConnectEnd implements pgx.ConnectTracer.
-func (t *Tracer) TraceConnectEnd(ctx context.Context, data pgx.TraceConnectEndData) {
+func (t *QueryTracer) TraceConnectEnd(ctx context.Context, data pgx.TraceConnectEndData) {
 	span := trace.SpanFromContext(ctx)
 	defer span.End()
 	// log the error
@@ -58,7 +58,7 @@ func (t *Tracer) TraceConnectEnd(ctx context.Context, data pgx.TraceConnectEndDa
 }
 
 // TracePrepareStart implements pgx.PrepareTracer.
-func (t *Tracer) TracePrepareStart(ctx context.Context, conn *pgx.Conn, data pgx.TracePrepareStartData) context.Context {
+func (t *QueryTracer) TracePrepareStart(ctx context.Context, conn *pgx.Conn, data pgx.TracePrepareStartData) context.Context {
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
@@ -75,7 +75,7 @@ func (t *Tracer) TracePrepareStart(ctx context.Context, conn *pgx.Conn, data pgx
 }
 
 // TracePrepareEnd implements pgx.PrepareTracer.
-func (t *Tracer) TracePrepareEnd(ctx context.Context, conn *pgx.Conn, data pgx.TracePrepareEndData) {
+func (t *QueryTracer) TracePrepareEnd(ctx context.Context, conn *pgx.Conn, data pgx.TracePrepareEndData) {
 	span := trace.SpanFromContext(ctx)
 	defer span.End()
 	// log the error
@@ -83,7 +83,7 @@ func (t *Tracer) TracePrepareEnd(ctx context.Context, conn *pgx.Conn, data pgx.T
 }
 
 // TraceQueryStart implements pgx.QueryTracer.
-func (t *Tracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+func (t *QueryTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
@@ -100,7 +100,7 @@ func (t *Tracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.T
 }
 
 // TraceQueryEnd implements pgx.QueryTracer.
-func (t *Tracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryEndData) {
+func (t *QueryTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryEndData) {
 	span := trace.SpanFromContext(ctx)
 	defer span.End()
 
@@ -113,7 +113,7 @@ func (t *Tracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, data pgx.Tra
 }
 
 // TraceCopyFromStart implements pgx.CopyFromTracer.
-func (t *Tracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceCopyFromStartData) context.Context {
+func (t *QueryTracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceCopyFromStartData) context.Context {
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
@@ -133,7 +133,7 @@ func (t *Tracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, data pg
 }
 
 // TraceCopyFromEnd implements pgx.CopyFromTracer.
-func (t *Tracer) TraceCopyFromEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceCopyFromEndData) {
+func (t *QueryTracer) TraceCopyFromEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceCopyFromEndData) {
 	span := trace.SpanFromContext(ctx)
 	defer span.End()
 
@@ -146,7 +146,7 @@ func (t *Tracer) TraceCopyFromEnd(ctx context.Context, conn *pgx.Conn, data pgx.
 }
 
 // TraceBatchStart implements pgx.BatchTracer.
-func (t *Tracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchStartData) context.Context {
+func (t *QueryTracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchStartData) context.Context {
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
@@ -166,7 +166,7 @@ func (t *Tracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data pgx.T
 }
 
 // TraceBatchQuery implements pgx.BatchTracer.
-func (t *Tracer) TraceBatchQuery(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchQueryData) {
+func (t *QueryTracer) TraceBatchQuery(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchQueryData) {
 	opts := []trace.SpanStartOption{}
 	opts = append(opts, t.options(conn.Config())...)
 	opts = append(opts, t.query(data.SQL)...)
@@ -182,7 +182,7 @@ func (t *Tracer) TraceBatchQuery(ctx context.Context, conn *pgx.Conn, data pgx.T
 }
 
 // TraceBatchEnd implements pgx.BatchTracer.
-func (t *Tracer) TraceBatchEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchEndData) {
+func (t *QueryTracer) TraceBatchEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchEndData) {
 	span := trace.SpanFromContext(ctx)
 	defer span.End()
 
@@ -190,7 +190,7 @@ func (t *Tracer) TraceBatchEnd(ctx context.Context, conn *pgx.Conn, data pgx.Tra
 	t.error(span, data.Err)
 }
 
-func (t *Tracer) options(config *pgx.ConnConfig) []trace.SpanStartOption {
+func (t *QueryTracer) options(config *pgx.ConnConfig) []trace.SpanStartOption {
 	return []trace.SpanStartOption{
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
@@ -204,7 +204,7 @@ func (t *Tracer) options(config *pgx.ConnConfig) []trace.SpanStartOption {
 	}
 }
 
-func (q *Tracer) span(prefix, command string) string {
+func (q *QueryTracer) span(prefix, command string) string {
 	if name := q.name(command); name != "unknown" {
 		command = name
 	}
@@ -214,7 +214,7 @@ func (q *Tracer) span(prefix, command string) string {
 
 var pattern = regexp.MustCompile(`^--\s+name:\s+(\w+)`)
 
-func (q *Tracer) name(v string) string {
+func (q *QueryTracer) name(v string) string {
 	if match := pattern.FindStringSubmatch(v); len(match) == 2 {
 		return match[1]
 	}
@@ -222,7 +222,7 @@ func (q *Tracer) name(v string) string {
 	return "unknown"
 }
 
-func (q *Tracer) query(command string) []trace.SpanStartOption {
+func (q *QueryTracer) query(command string) []trace.SpanStartOption {
 	name := q.name(command)
 
 	return []trace.SpanStartOption{
@@ -233,7 +233,7 @@ func (q *Tracer) query(command string) []trace.SpanStartOption {
 	}
 }
 
-func (t *Tracer) error(span trace.Span, err error) {
+func (t *QueryTracer) error(span trace.Span, err error) {
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			if !errors.Is(err, pgx.ErrNoRows) {
