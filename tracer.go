@@ -1,10 +1,12 @@
 package pgxotel
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
 	"regexp"
+	"strings"
 
 	pgx "github.com/jackc/pgx/v5"
 	pgconn "github.com/jackc/pgx/v5/pgconn"
@@ -37,9 +39,12 @@ func (t *QueryTracer) TraceConnectStart(ctx context.Context, data pgx.TraceConne
 		return ctx
 	}
 
-	opts := t.options(data.ConnConfig)
+	// attributes
+	attrs := []attribute.KeyValue{}
+	attrs = append(attrs, t.config(data.ConnConfig)...)
 	// prepare the span
-	ctx, _ = t.tracer().Start(ctx, "Connect", opts...)
+	ctx, span := t.start(ctx, "Connect", attrs)
+	span.AddEvent("ConnectStart")
 	// done!
 	return ctx
 }
@@ -47,9 +52,11 @@ func (t *QueryTracer) TraceConnectStart(ctx context.Context, data pgx.TraceConne
 // TraceConnectEnd implements pgx.ConnectTracer.
 func (t *QueryTracer) TraceConnectEnd(ctx context.Context, data pgx.TraceConnectEndData) {
 	span := trace.SpanFromContext(ctx)
-	defer span.End()
-	// log the error
-	t.error(span, data.Err)
+	span.AddEvent("ConnectEnd")
+
+	attrs := []attribute.KeyValue{}
+	// done
+	t.stop(span, data.Err, attrs)
 }
 
 // TracePrepareStart implements pgx.PrepareTracer.
@@ -58,13 +65,13 @@ func (t *QueryTracer) TracePrepareStart(ctx context.Context, conn *pgx.Conn, dat
 		return ctx
 	}
 
-	opts := []trace.SpanStartOption{}
-	opts = append(opts, t.options(conn.Config())...)
-	opts = append(opts, t.query(data.SQL)...)
+	attrs := []attribute.KeyValue{}
+	attrs = append(attrs, t.config(conn.Config())...)
+	attrs = append(attrs, t.statement(data.SQL))
 
-	name := t.span("Prepare", data.SQL)
 	// prepare the context
-	ctx, _ = t.tracer().Start(ctx, name, opts...)
+	ctx, span := t.start(ctx, data.SQL, attrs)
+	span.AddEvent("PrepareStart")
 	// done!
 	return ctx
 }
@@ -72,9 +79,11 @@ func (t *QueryTracer) TracePrepareStart(ctx context.Context, conn *pgx.Conn, dat
 // TracePrepareEnd implements pgx.PrepareTracer.
 func (t *QueryTracer) TracePrepareEnd(ctx context.Context, conn *pgx.Conn, data pgx.TracePrepareEndData) {
 	span := trace.SpanFromContext(ctx)
-	defer span.End()
-	// log the error
-	t.error(span, data.Err)
+	span.AddEvent("PrepareEnd")
+
+	attrs := []attribute.KeyValue{}
+	// done
+	t.stop(span, data.Err, attrs)
 }
 
 // TraceQueryStart implements pgx.QueryTracer.
@@ -83,13 +92,12 @@ func (t *QueryTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data 
 		return ctx
 	}
 
-	opts := []trace.SpanStartOption{}
-	opts = append(opts, t.options(conn.Config())...)
-	opts = append(opts, t.query(data.SQL)...)
-
-	name := t.span("Query", data.SQL)
+	attrs := []attribute.KeyValue{}
+	attrs = append(attrs, t.config(conn.Config())...)
+	attrs = append(attrs, t.statement(data.SQL))
 	// prepare the context
-	ctx, _ = t.tracer().Start(ctx, name, opts...)
+	ctx, span := t.start(ctx, data.SQL, attrs)
+	span.AddEvent("QueryStart")
 	// done!
 	return ctx
 }
@@ -97,14 +105,11 @@ func (t *QueryTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data 
 // TraceQueryEnd implements pgx.QueryTracer.
 func (t *QueryTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryEndData) {
 	span := trace.SpanFromContext(ctx)
-	defer span.End()
+	span.AddEvent("QueryEnd")
 
-	if data.Err != nil {
-		span.SetAttributes(DBRowsAffected(data.CommandTag))
-	}
-
-	// log the error
-	t.error(span, data.Err)
+	attrs := []attribute.KeyValue{}
+	// done
+	t.stop(span, data.Err, attrs)
 }
 
 // TraceCopyFromStart implements pgx.CopyFromTracer.
@@ -113,16 +118,13 @@ func (t *QueryTracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, da
 		return ctx
 	}
 
-	opts := t.options(conn.Config())
-	// prepare the options
-	opts = append(opts,
-		trace.WithAttributes(
-			semconv.DBSQLTable(data.TableName.Sanitize()),
-		),
-	)
-
+	// attributes
+	attrs := []attribute.KeyValue{}
+	attrs = append(attrs, t.config(conn.Config())...)
+	attrs = append(attrs, t.collection(data.TableName))
 	// prepare the context
-	ctx, _ = t.tracer().Start(ctx, "CopyFrom", opts...)
+	ctx, span := t.start(ctx, "Copy", attrs)
+	span.AddEvent("CopyFromStart")
 	// done!
 	return ctx
 }
@@ -130,14 +132,12 @@ func (t *QueryTracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, da
 // TraceCopyFromEnd implements pgx.CopyFromTracer.
 func (t *QueryTracer) TraceCopyFromEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceCopyFromEndData) {
 	span := trace.SpanFromContext(ctx)
-	defer span.End()
+	span.AddEvent("CopyFromEnd")
 
-	if data.Err != nil {
-		span.SetAttributes(DBRowsAffected(data.CommandTag))
-	}
-
-	// log the error
-	t.error(span, data.Err)
+	attrs := []attribute.KeyValue{}
+	attrs = append(attrs, t.command(data.CommandTag))
+	// done!
+	t.stop(span, data.Err, attrs)
 }
 
 // TraceBatchStart implements pgx.BatchTracer.
@@ -146,57 +146,36 @@ func (t *QueryTracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data 
 		return ctx
 	}
 
-	opts := t.options(conn.Config())
-	// prepare the options
-	opts = append(opts,
-		trace.WithAttributes(
-			DBOperationCount(data.Batch),
-		),
-	)
-
+	attrs := []attribute.KeyValue{}
+	attrs = append(attrs, t.config(conn.Config())...)
 	// prepare the context
-	ctx, _ = t.tracer().Start(ctx, "BatchStart", opts...)
+	ctx, _ = t.start(ctx, "BatchStart", attrs)
 	// done!
 	return ctx
 }
 
 // TraceBatchQuery implements pgx.BatchTracer.
 func (t *QueryTracer) TraceBatchQuery(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchQueryData) {
-	opts := []trace.SpanStartOption{}
-	opts = append(opts, t.options(conn.Config())...)
-	opts = append(opts, t.query(data.SQL)...)
-	opts = append(opts, trace.WithAttributes(
-		DBRowsAffected(data.CommandTag),
-	))
+	attrs := []attribute.KeyValue{}
+	attrs = append(attrs, t.config(conn.Config())...)
+	attrs = append(attrs, t.command(data.CommandTag))
+	attrs = append(attrs, t.statement(data.SQL))
 
 	// prepare the context
-	_, span := t.tracer().Start(ctx, "BatchQuery", opts...)
-	defer span.End()
+	_, span := t.start(ctx, data.SQL, attrs)
+	span.AddEvent("BatchQuery")
 	// done!
-	t.error(span, data.Err)
+	t.stop(span, data.Err, attrs)
 }
 
 // TraceBatchEnd implements pgx.BatchTracer.
 func (t *QueryTracer) TraceBatchEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchEndData) {
 	span := trace.SpanFromContext(ctx)
-	defer span.End()
+	span.AddEvent("BatchEnd")
 
-	// log the error
-	t.error(span, data.Err)
-}
-
-func (t *QueryTracer) options(config *pgx.ConnConfig) []trace.SpanStartOption {
-	return []trace.SpanStartOption{
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			semconv.NetPeerName(config.Host),
-			semconv.NetPeerPort(int(config.Port)),
-			// database attributes
-			semconv.DBSystemPostgreSQL,
-			semconv.DBUser(config.User),
-			semconv.DBName(config.Database),
-		),
-	}
+	attrs := []attribute.KeyValue{}
+	// done
+	t.stop(span, data.Err, attrs)
 }
 
 func (q *QueryTracer) tracer() trace.Tracer {
@@ -204,69 +183,95 @@ func (q *QueryTracer) tracer() trace.Tracer {
 	return otel.GetTracerProvider().Tracer(q.Name, q.Options...)
 }
 
-func (q *QueryTracer) span(prefix, command string) string {
-	if name := q.name(command); name != "unknown" {
-		command = name
-	}
-
-	return prefix + " " + command
-}
-
 var pattern = regexp.MustCompile(`^--\s+name:\s+(\w+)`)
 
-func (q *QueryTracer) name(v string) string {
-	if match := pattern.FindStringSubmatch(v); len(match) == 2 {
-		return match[1]
+func (q *QueryTracer) start(ctx context.Context, name string, attrs []attribute.KeyValue) (context.Context, trace.Span) {
+	if match := pattern.FindStringSubmatch(name); len(match) == 2 {
+		name = match[1]
 	}
 
-	return "unknown"
-}
-
-func (q *QueryTracer) query(command string) []trace.SpanStartOption {
-	name := q.name(command)
-
-	return []trace.SpanStartOption{
-		trace.WithAttributes(
-			semconv.DBOperation(name),
-			semconv.DBStatement(command),
-		),
+	options := []trace.SpanStartOption{
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attrs...),
 	}
+
+	return q.tracer().Start(ctx, name, options...)
 }
 
-func (t *QueryTracer) error(span trace.Span, err error) {
+func (t *QueryTracer) stop(span trace.Span, err error, attrs []attribute.KeyValue) {
+	defer span.End()
+	// set the attributes
+	for _, attr := range attrs {
+		if attr.Valid() {
+			span.SetAttributes(attr)
+		}
+	}
+
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			if !errors.Is(err, pgx.ErrNoRows) {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, err.Error())
-
-				var pgerr *pgconn.PgError
-
-				if errors.As(err, &pgerr) {
-					span.SetAttributes(DBErrorCode(pgerr))
-					span.SetAttributes(DBErrorMessage(pgerr))
-				}
 			}
 		}
 	}
 }
 
-func DBErrorCode(err *pgconn.PgError) attribute.KeyValue {
-	const key = attribute.Key("db.error_code")
-	return key.String(err.Code)
+func (t *QueryTracer) config(config *pgx.ConnConfig) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		semconv.DBSystemPostgreSQL,
+		semconv.DBUser(config.User),
+		semconv.DBName(config.Database),
+		semconv.DBConnectionString(t.connection(config)),
+	}
 }
 
-func DBErrorMessage(err *pgconn.PgError) attribute.KeyValue {
-	const key = attribute.Key("db.error_message")
-	return key.String(err.Message)
+func (t *QueryTracer) connection(config *pgx.ConnConfig) string {
+	conn := config.ConnString()
+	conn = strings.ReplaceAll(conn, config.Password, strings.Repeat("*", len(config.Password)))
+	return conn
 }
 
-func DBRowsAffected(tag pgconn.CommandTag) attribute.KeyValue {
-	const key = attribute.Key("db.rows_affected")
-	return key.Int64(tag.RowsAffected())
+func (q *QueryTracer) command(command pgconn.CommandTag) attribute.KeyValue {
+	name := "UNKNOWN"
+
+	switch {
+	case command.Select():
+		name = "SELECT"
+	case command.Insert():
+		name = "INSERT"
+	case command.Delete():
+		name = "DELETE"
+	case command.Update():
+		name = "UPDATE"
+	}
+
+	return semconv.DBOperation(name)
 }
 
-func DBOperationCount(batch *pgx.Batch) attribute.KeyValue {
-	const key = attribute.Key("db.operation_count")
-	return key.Int(batch.Len())
+func (t *QueryTracer) collection(name pgx.Identifier) attribute.KeyValue {
+	return semconv.DBSQLTable(name.Sanitize())
+}
+
+func (q *QueryTracer) statement(query string) attribute.KeyValue {
+	reader := strings.NewReader(query)
+	scanner := bufio.NewScanner(reader)
+
+	builder := &strings.Builder{}
+	// scan the query and fill the builder
+	for scanner.Scan() {
+		text := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(text, "--") {
+			continue
+		}
+
+		if builder.Len() > 0 {
+			builder.WriteString(" ")
+		}
+		builder.WriteString(text)
+	}
+
+	statement := builder.String()
+	// done
+	return semconv.DBStatement(statement)
 }
