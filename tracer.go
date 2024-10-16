@@ -13,7 +13,7 @@ import (
 	otel "go.opentelemetry.io/otel"
 	attribute "go.opentelemetry.io/otel/attribute"
 	codes "go.opentelemetry.io/otel/codes"
-	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
 	trace "go.opentelemetry.io/otel/trace"
 )
 
