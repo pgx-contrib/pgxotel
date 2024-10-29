@@ -260,14 +260,25 @@ func (q *QueryTracer) statement(query string) attribute.KeyValue {
 	builder := &strings.Builder{}
 	// scan the query and fill the builder
 	for scanner.Scan() {
-		text := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(text, "--") {
+		text := scanner.Text()
+		text = strings.TrimSpace(text)
+
+		index := strings.Index(text, "--")
+
+		if index == 0 {
 			continue
 		}
+
+		if index > 0 {
+			text = text[:index]
+		}
+
+		text = strings.TrimSpace(text)
 
 		if builder.Len() > 0 {
 			builder.WriteString(" ")
 		}
+
 		builder.WriteString(text)
 	}
 
