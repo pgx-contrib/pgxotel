@@ -108,26 +108,33 @@ Every span carries the following attributes:
 | `db.collection.name` | table name (CopyFrom only)                            |
 | `db.query.text`      | sanitized SQL (opt-in via `IncludeStatement`)         |
 
-## Contributing
+## Development
 
-Contributions are welcome! Please open an issue or pull request.
+### DevContainer
 
-To set up a development environment with [Nix](https://nixos.org):
+Open in VS Code with the Dev Containers extension. The environment provides Go,
+PostgreSQL 18, and Nix automatically.
 
-```bash
-nix develop
+```
+PGX_DATABASE_URL=postgres://vscode@postgres:5432/pgxotel?sslmode=disable
 ```
 
-Or using the provided dev container:
+### Nix
 
 ```bash
-devcontainer up --workspace-folder . --remove-existing-container
+nix develop          # enter shell with Go
+go tool ginkgo run -r
 ```
 
-Then run the tests:
+### Run tests
 
 ```bash
-go test ./...
+# Unit tests only (no database required)
+go tool ginkgo run -r
+
+# With integration tests
+export PGX_DATABASE_URL="postgres://localhost/pgxotel?sslmode=disable"
+go tool ginkgo run -r
 ```
 
 ## License
