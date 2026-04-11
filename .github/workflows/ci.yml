@@ -26,6 +26,8 @@ jobs:
 
       - name: Setup Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v13
+        with:
+          use-flakehub: false
 
       - name: Run Tests
         run: nix develop --command go tool ginkgo run -r
