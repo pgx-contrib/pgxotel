@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/pgx-contrib/pgxotel/actions/workflows/ci.yml/badge.svg)](https://github.com/pgx-contrib/pgxotel/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/pgx-contrib/pgxotel?include_prereleases)](https://github.com/pgx-contrib/pgxotel/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/pgx-contrib/pgxotel.svg)](https://pkg.go.dev/github.com/pgx-contrib/pgxotel)
 [![License](https://img.shields.io/github/license/pgx-contrib/pgxotel)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![pgx](https://img.shields.io/badge/pgx-v5-blue)](https://github.com/jackc/pgx)
