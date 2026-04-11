@@ -1,0 +1,30 @@
+name: CI
+
+permissions:
+  contents: read
+  id-token: write
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Start DevContainer
+        uses: devcontainer-env/devcontainer-ci@main
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Setup Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Run Tests
+        run: nix develop --command go tool ginkgo run -r
