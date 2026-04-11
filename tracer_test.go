@@ -5,22 +5,20 @@ import (
 	"database/sql"
 	"errors"
 	"os"
-	"strings"
 
 	pgx "github.com/jackc/pgx/v5"
 	pgconn "github.com/jackc/pgx/v5/pgconn"
 	pgxpool "github.com/jackc/pgx/v5/pgxpool"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	otel "go.opentelemetry.io/otel"
 	attribute "go.opentelemetry.io/otel/attribute"
 	codes "go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	tracetest "go.opentelemetry.io/otel/sdk/trace/tracetest"
-	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
 	trace "go.opentelemetry.io/otel/trace"
-
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 )
 
 // findSpanByName returns the first span with the given name, or nil.
@@ -33,16 +31,7 @@ func findSpanByName(spans tracetest.SpanStubs, name string) *tracetest.SpanStub 
 	return nil
 }
 
-// spanEventNames returns the names of all events on a span.
-func spanEventNames(s *tracetest.SpanStub) []string {
-	names := make([]string, len(s.Events))
-	for i, e := range s.Events {
-		names[i] = e.Name
-	}
-	return names
-}
-
-// findAttr returns a pointer to the first attribute with the given key string, or nil.
+// findAttr returns a pointer to the first attribute with the given key, or nil.
 func findAttr(attrs []attribute.KeyValue, key string) *attribute.KeyValue {
 	for i := range attrs {
 		if string(attrs[i].Key) == key {
@@ -73,172 +62,131 @@ var _ = Describe("pgxotel unit tests", func() {
 	// -------------------------------------------------------------------------
 	Describe("tracer()", func() {
 		It("returns a non-nil tracer using the Name field", func() {
-			tr := qt.tracer()
-			Expect(tr).NotTo(BeNil())
+			Expect(qt.tracer()).NotTo(BeNil())
 		})
 
-		It("picks up a changed global TracerProvider", func() {
+		It("uses the Provider field when set", func() {
 			exporter2 := tracetest.NewInMemoryExporter()
 			tp2 := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter2))
-			otel.SetTracerProvider(tp2)
+			defer tp2.Shutdown(context.Background()) //nolint:errcheck
 
-			qt2 := &QueryTracer{Name: "other-tracer"}
-			tr := qt2.tracer()
-			Expect(tr).NotTo(BeNil())
+			qt2 := &QueryTracer{Name: "scoped", Provider: tp2}
+			ctx, parentSpan := tp2.Tracer("test").Start(context.Background(), "parent")
+			defer parentSpan.End()
 
-			Expect(tp2.Shutdown(context.Background())).To(Succeed())
+			_, span := qt2.start(ctx, "SELECT", nil)
+			span.End()
+
+			// span should appear in tp2's exporter, not the global one
+			Expect(exporter2.GetSpans()).NotTo(BeEmpty())
+			Expect(exporter.GetSpans()).To(BeEmpty())
+		})
+
+		It("caches the tracer after first call", func() {
+			t1 := qt.tracer()
+			t2 := qt.tracer()
+			Expect(t1).To(BeIdenticalTo(t2))
 		})
 	})
 
 	// -------------------------------------------------------------------------
+	Describe("spanName()", func() {
+		DescribeTable("derives low-cardinality names",
+			func(sql, expected string) {
+				Expect(spanName(sql)).To(Equal(expected))
+			},
+			Entry("-- name: comment", "-- name: FindUser\nSELECT 1", "FindUser"),
+			Entry("SELECT keyword", "SELECT id FROM users", "SELECT"),
+			Entry("INSERT keyword", "INSERT INTO users VALUES ($1)", "INSERT"),
+			Entry("UPDATE keyword", "UPDATE users SET name=$1", "UPDATE"),
+			Entry("DELETE keyword", "DELETE FROM users WHERE id=$1", "DELETE"),
+			Entry("lowercase select", "select * from t", "SELECT"),
+			Entry("mixed-case begin", "Begin", "BEGIN"),
+			Entry("unrecognised SQL falls back", "VACUUM ANALYZE users", "db.query"),
+			Entry("empty string falls back", "", "db.query"),
+		)
+	})
+
+	// -------------------------------------------------------------------------
 	Describe("start()", func() {
-		It("uses raw SQL string as span name when no -- name: comment", func() {
-			ctx := context.Background()
-			ctx, parentSpan := tp.Tracer("test").Start(ctx, "parent")
+		It("creates a span with the exact name provided", func() {
+			ctx, parentSpan := tp.Tracer("test").Start(context.Background(), "parent")
 			defer parentSpan.End()
 
-			_, span := qt.start(ctx, "SELECT 1", nil)
+			_, span := qt.start(ctx, "Connect", nil)
 			span.End()
 
-			spans := exporter.GetSpans()
-			s := findSpanByName(spans, "SELECT 1")
-			Expect(s).NotTo(BeNil())
-		})
-
-		It("extracts span name from -- name: Foo prefix via regex", func() {
-			cases := []struct {
-				sql      string
-				wantName string
-			}{
-				{"-- name: FindUser\nSELECT * FROM users WHERE id = $1", "FindUser"},
-				{"-- name: CreateOrder\nINSERT INTO orders VALUES ($1)", "CreateOrder"},
-				{"-- name: ListItems\nSELECT id FROM items", "ListItems"},
-			}
-
-			ctx := context.Background()
-			ctx, parentSpan := tp.Tracer("test").Start(ctx, "parent")
-			defer parentSpan.End()
-
-			for _, tc := range cases {
-				exporter.Reset()
-				_, span := qt.start(ctx, tc.sql, nil)
-				span.End()
-
-				spans := exporter.GetSpans()
-				s := findSpanByName(spans, tc.wantName)
-				Expect(s).NotTo(BeNil(), "expected span named %q for sql %q", tc.wantName, tc.sql)
-			}
+			Expect(findSpanByName(exporter.GetSpans(), "Connect")).NotTo(BeNil())
 		})
 
 		It("sets SpanKindClient on every created span", func() {
-			ctx := context.Background()
-			ctx, parentSpan := tp.Tracer("test").Start(ctx, "parent")
+			ctx, parentSpan := tp.Tracer("test").Start(context.Background(), "parent")
 			defer parentSpan.End()
 
-			_, span := qt.start(ctx, "SELECT 1", nil)
+			_, span := qt.start(ctx, "SELECT", nil)
 			span.End()
 
-			spans := exporter.GetSpans()
-			s := findSpanByName(spans, "SELECT 1")
+			s := findSpanByName(exporter.GetSpans(), "SELECT")
 			Expect(s).NotTo(BeNil())
 			Expect(s.SpanKind).To(Equal(trace.SpanKindClient))
 		})
 
 		It("attaches provided attributes to the span", func() {
-			ctx := context.Background()
-			ctx, parentSpan := tp.Tracer("test").Start(ctx, "parent")
+			ctx, parentSpan := tp.Tracer("test").Start(context.Background(), "parent")
 			defer parentSpan.End()
 
-			attrs := []attribute.KeyValue{
-				attribute.String("db.system", "postgresql"),
-				attribute.String("db.name", "testdb"),
-			}
-			_, span := qt.start(ctx, "SELECT 1", attrs)
+			attrs := []attribute.KeyValue{attribute.String("db.namespace", "testdb")}
+			_, span := qt.start(ctx, "SELECT", attrs)
 			span.End()
 
-			spans := exporter.GetSpans()
-			s := findSpanByName(spans, "SELECT 1")
+			s := findSpanByName(exporter.GetSpans(), "SELECT")
 			Expect(s).NotTo(BeNil())
-
-			dbSystem := findAttr(s.Attributes, "db.system")
-			Expect(dbSystem).NotTo(BeNil())
-			Expect(dbSystem.Value.AsString()).To(Equal("postgresql"))
+			Expect(findAttr(s.Attributes, "db.namespace")).NotTo(BeNil())
 		})
 	})
 
 	// -------------------------------------------------------------------------
 	Describe("stop()", func() {
-		makeSpan := func(ctx context.Context) trace.Span {
-			_, span := tp.Tracer("test").Start(ctx, "op")
+		makeSpan := func() trace.Span {
+			_, span := tp.Tracer("test").Start(context.Background(), "op")
 			return span
 		}
 
-		It("ends span with codes.Unset when err == nil", func() {
-			ctx := context.Background()
-			span := makeSpan(ctx)
-			qt.stop(span, nil, nil)
-
-			spans := exporter.GetSpans()
-			Expect(spans).To(HaveLen(1))
-			Expect(spans[0].Status.Code).To(Equal(codes.Unset))
+		It("ends span with codes.Unset when err is nil", func() {
+			qt.stop(makeSpan(), nil)
+			Expect(exporter.GetSpans()[0].Status.Code).To(Equal(codes.Unset))
 		})
 
 		It("does NOT record error for sql.ErrNoRows", func() {
-			ctx := context.Background()
-			span := makeSpan(ctx)
-			qt.stop(span, sql.ErrNoRows, nil)
-
-			spans := exporter.GetSpans()
-			Expect(spans).To(HaveLen(1))
-			Expect(spans[0].Status.Code).To(Equal(codes.Unset))
-
-			for _, e := range spans[0].Events {
+			qt.stop(makeSpan(), sql.ErrNoRows)
+			s := exporter.GetSpans()[0]
+			Expect(s.Status.Code).To(Equal(codes.Unset))
+			for _, e := range s.Events {
 				Expect(e.Name).NotTo(Equal("exception"))
 			}
 		})
 
 		It("does NOT record error for pgx.ErrNoRows", func() {
-			ctx := context.Background()
-			span := makeSpan(ctx)
-			qt.stop(span, pgx.ErrNoRows, nil)
-
-			spans := exporter.GetSpans()
-			Expect(spans).To(HaveLen(1))
-			Expect(spans[0].Status.Code).To(Equal(codes.Unset))
-
-			for _, e := range spans[0].Events {
+			qt.stop(makeSpan(), pgx.ErrNoRows)
+			s := exporter.GetSpans()[0]
+			Expect(s.Status.Code).To(Equal(codes.Unset))
+			for _, e := range s.Events {
 				Expect(e.Name).NotTo(Equal("exception"))
 			}
 		})
 
 		It("records error and sets codes.Error for any other error", func() {
-			ctx := context.Background()
-			span := makeSpan(ctx)
-			err := errors.New("connection refused")
-			qt.stop(span, err, nil)
-
-			spans := exporter.GetSpans()
-			Expect(spans).To(HaveLen(1))
-			Expect(spans[0].Status.Code).To(Equal(codes.Error))
-			Expect(spans[0].Status.Description).To(Equal("connection refused"))
-
-			eventNames := spanEventNames(&spans[0])
-			Expect(eventNames).To(ContainElement("exception"))
-		})
-
-		It("sets valid attributes on the span when provided", func() {
-			ctx := context.Background()
-			span := makeSpan(ctx)
-			attrs := []attribute.KeyValue{
-				attribute.String("db.operation", "SELECT"),
+			qt.stop(makeSpan(), errors.New("connection refused"))
+			s := exporter.GetSpans()[0]
+			Expect(s.Status.Code).To(Equal(codes.Error))
+			Expect(s.Status.Description).To(Equal("connection refused"))
+			var hasException bool
+			for _, e := range s.Events {
+				if e.Name == "exception" {
+					hasException = true
+				}
 			}
-			qt.stop(span, nil, attrs)
-
-			spans := exporter.GetSpans()
-			Expect(spans).To(HaveLen(1))
-			dbOp := findAttr(spans[0].Attributes, "db.operation")
-			Expect(dbOp).NotTo(BeNil())
-			Expect(dbOp.Value.AsString()).To(Equal("SELECT"))
+			Expect(hasException).To(BeTrue())
 		})
 	})
 
@@ -248,94 +196,64 @@ var _ = Describe("pgxotel unit tests", func() {
 
 		BeforeEach(func() {
 			var err error
-			connConfig, err = pgx.ParseConfig("host=localhost user=testuser password=secret dbname=testdb")
+			connConfig, err = pgx.ParseConfig("host=db.example.com port=5433 user=testuser password=secret dbname=testdb")
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("returns semconv.DBSystemPostgreSQL", func() {
-			attrs := qt.config(connConfig)
-			dbSystem := findAttr(attrs, "db.system")
-			Expect(dbSystem).NotTo(BeNil())
-			Expect(dbSystem.Value.AsString()).To(Equal(semconv.DBSystemPostgreSQL.Value.AsString()))
+		It("returns db.system.name = postgresql", func() {
+			a := findAttr(qt.config(connConfig), "db.system.name")
+			Expect(a).NotTo(BeNil())
+			Expect(a.Value.AsString()).To(Equal("postgresql"))
 		})
 
-		It("returns db.user from ConnConfig.User", func() {
-			attrs := qt.config(connConfig)
-			dbUser := findAttr(attrs, "db.user")
-			Expect(dbUser).NotTo(BeNil())
-			Expect(dbUser.Value.AsString()).To(Equal("testuser"))
+		It("returns db.namespace from ConnConfig.Database", func() {
+			a := findAttr(qt.config(connConfig), "db.namespace")
+			Expect(a).NotTo(BeNil())
+			Expect(a.Value.AsString()).To(Equal("testdb"))
 		})
 
-		It("returns db.name from ConnConfig.Database", func() {
-			attrs := qt.config(connConfig)
-			dbName := findAttr(attrs, "db.name")
-			Expect(dbName).NotTo(BeNil())
-			Expect(dbName.Value.AsString()).To(Equal("testdb"))
+		It("returns server.address from ConnConfig.Host", func() {
+			a := findAttr(qt.config(connConfig), "server.address")
+			Expect(a).NotTo(BeNil())
+			Expect(a.Value.AsString()).To(Equal("db.example.com"))
 		})
 
-		It("returns db.connection_string with password masked", func() {
+		It("returns server.port from ConnConfig.Port", func() {
+			a := findAttr(qt.config(connConfig), "server.port")
+			Expect(a).NotTo(BeNil())
+			Expect(a.Value.AsInt64()).To(Equal(int64(5433)))
+		})
+
+		It("does not include db.user or db.connection_string", func() {
 			attrs := qt.config(connConfig)
-			dbConn := findAttr(attrs, "db.connection_string")
-			Expect(dbConn).NotTo(BeNil())
-			Expect(dbConn.Value.AsString()).NotTo(ContainSubstring("secret"))
-			Expect(dbConn.Value.AsString()).To(ContainSubstring("******"))
+			Expect(findAttr(attrs, "db.user")).To(BeNil())
+			Expect(findAttr(attrs, "db.connection_string")).To(BeNil())
 		})
 	})
 
 	// -------------------------------------------------------------------------
-	Describe("connection()", func() {
-		DescribeTable("password masking",
-			func(password, notExpected, expectedMask string) {
-				connConfig, err := pgx.ParseConfig(
-					"host=localhost user=u dbname=db password=" + password,
-				)
-				Expect(err).NotTo(HaveOccurred())
-
-				result := qt.connection(connConfig)
-				if notExpected != "" {
-					Expect(result).NotTo(ContainSubstring(notExpected))
-				}
-				if expectedMask != "" {
-					Expect(result).To(ContainSubstring(expectedMask))
-				}
-			},
-			Entry("replaces password with asterisks", "secret", "secret", strings.Repeat("*", len("secret"))),
-			Entry("replaces longer password", "myLongP@ssw0rd", "myLongP@ssw0rd", strings.Repeat("*", len("myLongP@ssw0rd"))),
-		)
-
-		It("returns non-empty string when no password", func() {
-			connConfig, err := pgx.ParseConfig("host=localhost user=u dbname=db")
-			Expect(err).NotTo(HaveOccurred())
-			result := qt.connection(connConfig)
-			Expect(result).NotTo(BeEmpty())
-		})
-	})
-
-	// -------------------------------------------------------------------------
-	Describe("command()", func() {
-		DescribeTable("maps CommandTag to db.operation",
-			func(tagStr string, expectedOp string) {
-				tag := pgconn.NewCommandTag(tagStr)
-				kv := qt.command(tag)
-				Expect(string(kv.Key)).To(Equal("db.operation"))
+	Describe("operationName()", func() {
+		DescribeTable("maps CommandTag to db.operation.name",
+			func(tagStr, expectedOp string) {
+				kv := qt.operationName(pgconn.NewCommandTag(tagStr))
+				Expect(string(kv.Key)).To(Equal("db.operation.name"))
 				Expect(kv.Value.AsString()).To(Equal(expectedOp))
 			},
 			Entry("SELECT", "SELECT 5", "SELECT"),
 			Entry("INSERT", "INSERT 0 1", "INSERT"),
 			Entry("UPDATE", "UPDATE 3", "UPDATE"),
 			Entry("DELETE", "DELETE 2", "DELETE"),
-			Entry("COPY", "COPY 10", "UNKNOWN"),
-			Entry("empty", "", "UNKNOWN"),
+			Entry("COPY → UNKNOWN", "COPY 10", "UNKNOWN"),
+			Entry("empty → UNKNOWN", "", "UNKNOWN"),
 		)
 	})
 
 	// -------------------------------------------------------------------------
 	Describe("collection()", func() {
-		DescribeTable("sanitizes table identifier",
+		DescribeTable("returns db.collection.name with sanitized identifier",
 			func(parts []string, expected string) {
-				id := pgx.Identifier(parts)
-				kv := qt.collection(id)
-				Expect(string(kv.Key)).To(Equal("db.sql.table"))
+				kv := qt.collection(pgx.Identifier(parts))
+				Expect(string(kv.Key)).To(Equal("db.collection.name"))
 				Expect(kv.Value.AsString()).To(Equal(expected))
 			},
 			Entry("single part", []string{"users"}, `"users"`),
@@ -344,12 +262,10 @@ var _ = Describe("pgxotel unit tests", func() {
 	})
 
 	// -------------------------------------------------------------------------
-	Describe("statement()", func() {
-		DescribeTable("processes SQL",
-			func(sql string, expected string) {
-				kv := qt.statement(sql)
-				Expect(string(kv.Key)).To(Equal("db.statement"))
-				Expect(kv.Value.AsString()).To(Equal(expected))
+	Describe("sanitizeSQL()", func() {
+		DescribeTable("strips comments and joins lines",
+			func(input, expected string) {
+				Expect(sanitizeSQL(input)).To(Equal(expected))
 			},
 			Entry("plain single-line SQL",
 				"SELECT id FROM users",
@@ -363,11 +279,11 @@ var _ = Describe("pgxotel unit tests", func() {
 				"SELECT 1 -- inline comment",
 				"SELECT 1",
 			),
-			Entry("multi-line SQL joined to single line",
+			Entry("multi-line SQL joined",
 				"SELECT id\nFROM users\nWHERE id = $1",
 				"SELECT id FROM users WHERE id = $1",
 			),
-			Entry("-- name: comment + SQL — only SQL remains",
+			Entry("-- name: comment stripped, SQL preserved",
 				"-- name: FindUser\nSELECT * FROM users WHERE id = $1",
 				"SELECT * FROM users WHERE id = $1",
 			),
@@ -375,7 +291,26 @@ var _ = Describe("pgxotel unit tests", func() {
 				"-- just a comment\n-- another comment",
 				"",
 			),
+			Entry("empty lines ignored",
+				"SELECT id\n\n   \nFROM users",
+				"SELECT id FROM users",
+			),
 		)
+	})
+
+	// -------------------------------------------------------------------------
+	Describe("queryText()", func() {
+		It("returns nil when IncludeStatement is false (default)", func() {
+			Expect(qt.queryText("SELECT 1")).To(BeNil())
+		})
+
+		It("returns db.query.text with sanitized SQL when IncludeStatement is true", func() {
+			qt.IncludeStatement = true
+			kv := qt.queryText("-- name: Foo\nSELECT 1 -- inline")
+			Expect(kv).NotTo(BeNil())
+			Expect(string(kv.Key)).To(Equal("db.query.text"))
+			Expect(kv.Value.AsString()).To(Equal("SELECT 1"))
+		})
 	})
 
 	// -------------------------------------------------------------------------
@@ -390,91 +325,58 @@ var _ = Describe("pgxotel unit tests", func() {
 
 		It("non-recording parent context returns same ctx, no spans exported", func() {
 			ctx := context.Background()
-			// no parent span → SpanFromContext returns noopSpan (not recording)
-			resultCtx := qt.TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: connConfig})
-			Expect(resultCtx).To(Equal(ctx))
+			result := qt.TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: connConfig})
+			Expect(result).To(Equal(ctx))
 			Expect(exporter.GetSpans()).To(BeEmpty())
 		})
 
-		It("recording parent context creates child span named Connect with SpanKindClient", func() {
-			ctx := context.Background()
-			ctx, parentSpan := tp.Tracer("test").Start(ctx, "parent")
+		It("recording parent creates a child span named Connect with SpanKindClient", func() {
+			ctx, parentSpan := tp.Tracer("test").Start(context.Background(), "parent")
 			defer parentSpan.End()
 
 			ctx = qt.TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: connConfig})
 			qt.TraceConnectEnd(ctx, pgx.TraceConnectEndData{})
 
-			parentSpan.End()
-
-			spans := exporter.GetSpans()
-			s := findSpanByName(spans, "Connect")
+			s := findSpanByName(exporter.GetSpans(), "Connect")
 			Expect(s).NotTo(BeNil())
 			Expect(s.SpanKind).To(Equal(trace.SpanKindClient))
 		})
 
-		It("TraceConnectStart adds ConnectStart event; TraceConnectEnd adds ConnectEnd event", func() {
-			ctx := context.Background()
-			ctx, parentSpan := tp.Tracer("test").Start(ctx, "parent")
+		It("span carries server.address and db.namespace attributes", func() {
+			ctx, parentSpan := tp.Tracer("test").Start(context.Background(), "parent")
 			defer parentSpan.End()
 
 			ctx = qt.TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: connConfig})
 			qt.TraceConnectEnd(ctx, pgx.TraceConnectEndData{})
 
-			parentSpan.End()
-
-			spans := exporter.GetSpans()
-			s := findSpanByName(spans, "Connect")
+			s := findSpanByName(exporter.GetSpans(), "Connect")
 			Expect(s).NotTo(BeNil())
-			Expect(spanEventNames(s)).To(ContainElements("ConnectStart", "ConnectEnd"))
-		})
-
-		It("db.connection_string attribute has password masked", func() {
-			ctx := context.Background()
-			ctx, parentSpan := tp.Tracer("test").Start(ctx, "parent")
-			defer parentSpan.End()
-
-			ctx = qt.TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: connConfig})
-			qt.TraceConnectEnd(ctx, pgx.TraceConnectEndData{})
-
-			parentSpan.End()
-
-			spans := exporter.GetSpans()
-			s := findSpanByName(spans, "Connect")
-			Expect(s).NotTo(BeNil())
-			connStr := findAttr(s.Attributes, "db.connection_string")
-			Expect(connStr).NotTo(BeNil())
-			Expect(connStr.Value.AsString()).NotTo(ContainSubstring("secret"))
+			Expect(findAttr(s.Attributes, "server.address")).NotTo(BeNil())
+			Expect(findAttr(s.Attributes, "db.namespace")).NotTo(BeNil())
+			Expect(findAttr(s.Attributes, "db.connection_string")).To(BeNil())
 		})
 
 		It("TraceConnectEnd with nil error → codes.Unset", func() {
-			ctx := context.Background()
-			ctx, parentSpan := tp.Tracer("test").Start(ctx, "parent")
+			ctx, parentSpan := tp.Tracer("test").Start(context.Background(), "parent")
 			defer parentSpan.End()
 
 			ctx = qt.TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: connConfig})
 			qt.TraceConnectEnd(ctx, pgx.TraceConnectEndData{Err: nil})
 
-			parentSpan.End()
-
-			spans := exporter.GetSpans()
-			s := findSpanByName(spans, "Connect")
+			s := findSpanByName(exporter.GetSpans(), "Connect")
 			Expect(s).NotTo(BeNil())
 			Expect(s.Status.Code).To(Equal(codes.Unset))
 		})
 
 		It("TraceConnectEnd with error → codes.Error + description", func() {
-			ctx := context.Background()
-			ctx, parentSpan := tp.Tracer("test").Start(ctx, "parent")
+			ctx, parentSpan := tp.Tracer("test").Start(context.Background(), "parent")
 			defer parentSpan.End()
 
 			connErr := errors.New("dial tcp: connection refused")
 			ctx = qt.TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: connConfig})
 			qt.TraceConnectEnd(ctx, pgx.TraceConnectEndData{Err: connErr})
 
-			parentSpan.End()
-
-			spans := exporter.GetSpans()
-			s := findSpanByName(spans, "Connect")
+			s := findSpanByName(exporter.GetSpans(), "Connect")
 			Expect(s).NotTo(BeNil())
 			Expect(s.Status.Code).To(Equal(codes.Error))
 			Expect(s.Status.Description).To(Equal("dial tcp: connection refused"))
@@ -490,15 +392,19 @@ var _ = Describe("pgxotel unit tests", func() {
 		)
 
 		BeforeAll(func() {
-			dbURL := os.Getenv("PGX_DATABASE_URL")
-			if dbURL == "" {
+			if os.Getenv("PGX_DATABASE_URL") == "" {
 				Skip("PGX_DATABASE_URL not set")
 			}
 
-			config, err := pgxpool.ParseConfig(dbURL)
+			config, err := pgxpool.ParseConfig(os.Getenv("PGX_DATABASE_URL"))
 			Expect(err).NotTo(HaveOccurred())
 
-			config.ConnConfig.Tracer = qt
+			// Use a dedicated tracer with IncludeStatement so integration
+			// tests can verify db.query.text without disturbing unit tests.
+			config.ConnConfig.Tracer = &QueryTracer{
+				Name:             "integration-tracer",
+				IncludeStatement: true,
+			}
 
 			pool, err = pgxpool.NewWithConfig(context.Background(), config)
 			Expect(err).NotTo(HaveOccurred())
@@ -520,107 +426,79 @@ var _ = Describe("pgxotel unit tests", func() {
 		})
 
 		Describe("TraceQueryStart/End", func() {
-			It("creates span named after SQL with QueryStart + QueryEnd events", func() {
-				sql := "SELECT 1"
-				rows, err := pool.Query(intCtx, sql)
+			It("creates a low-cardinality span named after the SQL keyword", func() {
+				rows, err := pool.Query(intCtx, "SELECT 1")
 				Expect(err).NotTo(HaveOccurred())
 				rows.Close()
-
 				intSpan.End()
 
-				spans := exporter.GetSpans()
-				s := findSpanByName(spans, sql)
-				Expect(s).NotTo(BeNil())
-				Expect(spanEventNames(s)).To(ContainElements("QueryStart", "QueryEnd"))
+				Expect(findSpanByName(exporter.GetSpans(), "SELECT")).NotTo(BeNil())
 			})
 
-			It("names span from -- name: comment", func() {
-				sql := "-- name: HelloWorld\nSELECT 1"
-				rows, err := pool.Query(intCtx, sql)
+			It("uses -- name: comment as span name", func() {
+				rows, err := pool.Query(intCtx, "-- name: HelloWorld\nSELECT 1")
 				Expect(err).NotTo(HaveOccurred())
 				rows.Close()
-
 				intSpan.End()
 
-				spans := exporter.GetSpans()
-				s := findSpanByName(spans, "HelloWorld")
-				Expect(s).NotTo(BeNil())
+				Expect(findSpanByName(exporter.GetSpans(), "HelloWorld")).NotTo(BeNil())
 			})
 
-			It("db.statement attribute has comments stripped", func() {
-				sql := "-- name: Stripped\nSELECT 42"
-				rows, err := pool.Query(intCtx, sql)
+			It("db.query.text has comments stripped", func() {
+				rows, err := pool.Query(intCtx, "-- name: Stripped\nSELECT 42")
 				Expect(err).NotTo(HaveOccurred())
 				rows.Close()
-
 				intSpan.End()
 
-				spans := exporter.GetSpans()
-				s := findSpanByName(spans, "Stripped")
+				s := findSpanByName(exporter.GetSpans(), "Stripped")
 				Expect(s).NotTo(BeNil())
-				stmt := findAttr(s.Attributes, "db.statement")
+				stmt := findAttr(s.Attributes, "db.query.text")
 				Expect(stmt).NotTo(BeNil())
 				Expect(stmt.Value.AsString()).NotTo(ContainSubstring("--"))
 				Expect(stmt.Value.AsString()).To(ContainSubstring("SELECT 42"))
 			})
 
-			It("pgx.ErrNoRows does NOT set codes.Error on span", func() {
-				// QueryRow + Scan on a query returning no rows triggers pgx.ErrNoRows
+			It("db.operation.name is set at query end", func() {
+				rows, err := pool.Query(intCtx, "SELECT 1")
+				Expect(err).NotTo(HaveOccurred())
+				rows.Close()
+				intSpan.End()
+
+				s := findSpanByName(exporter.GetSpans(), "SELECT")
+				Expect(s).NotTo(BeNil())
+				op := findAttr(s.Attributes, "db.operation.name")
+				Expect(op).NotTo(BeNil())
+				Expect(op.Value.AsString()).To(Equal("SELECT"))
+			})
+
+			It("pgx.ErrNoRows does NOT set codes.Error on the span", func() {
 				var val int
 				err := pool.QueryRow(intCtx, "SELECT 1 WHERE 1=0").Scan(&val)
 				Expect(errors.Is(err, pgx.ErrNoRows)).To(BeTrue())
-
 				intSpan.End()
 
-				spans := exporter.GetSpans()
-				// Find any query span
-				var querySpan *tracetest.SpanStub
-				for i := range spans {
-					if findAttr(spans[i].Attributes, "db.statement") != nil {
-						querySpan = &spans[i]
-						break
+				for _, s := range exporter.GetSpans() {
+					if findAttr(s.Attributes, "db.namespace") != nil {
+						Expect(s.Status.Code).NotTo(Equal(codes.Error))
 					}
 				}
-				Expect(querySpan).NotTo(BeNil())
-				Expect(querySpan.Status.Code).NotTo(Equal(codes.Error))
 			})
 		})
 
 		Describe("TracePrepareStart/End", func() {
-			It("creates span with PrepareStart + PrepareEnd events", func() {
+			It("creates a span with SpanKindClient and db.query.text", func() {
 				conn, err := pool.Acquire(intCtx)
 				Expect(err).NotTo(HaveOccurred())
 				defer conn.Release()
 
 				_, err = conn.Conn().Prepare(intCtx, "stmt1", "SELECT $1::int")
 				Expect(err).NotTo(HaveOccurred())
-
 				intSpan.End()
 
-				spans := exporter.GetSpans()
-				var prepSpan *tracetest.SpanStub
-				for i := range spans {
-					if strings.Contains(spanEventNames(&spans[i])[0], "Prepare") {
-						prepSpan = &spans[i]
-						break
-					}
-				}
-				// Find any span with PrepareStart event
-				for i := range spans {
-					evts := spanEventNames(&spans[i])
-					hasPrep := false
-					for _, e := range evts {
-						if e == "PrepareStart" {
-							hasPrep = true
-						}
-					}
-					if hasPrep {
-						prepSpan = &spans[i]
-						break
-					}
-				}
-				Expect(prepSpan).NotTo(BeNil())
-				Expect(spanEventNames(prepSpan)).To(ContainElements("PrepareStart", "PrepareEnd"))
+				s := findSpanByName(exporter.GetSpans(), "SELECT")
+				Expect(s).NotTo(BeNil())
+				Expect(s.SpanKind).To(Equal(trace.SpanKindClient))
+				Expect(findAttr(s.Attributes, "db.query.text")).NotTo(BeNil())
 			})
 		})
 
@@ -641,47 +519,26 @@ var _ = Describe("pgxotel unit tests", func() {
 				_, _ = conn.Exec(intCtx, "DROP TABLE IF EXISTS pgxotel_copy_test")
 			})
 
-			It("creates span named Copy with CopyFromStart + CopyFromEnd events", func() {
-				rows := [][]interface{}{{1}, {2}, {3}}
+			It("creates a span named Copy with db.collection.name attribute", func() {
 				_, err := pool.CopyFrom(
 					intCtx,
 					pgx.Identifier{"pgxotel_copy_test"},
 					[]string{"id"},
-					pgx.CopyFromRows(rows),
+					pgx.CopyFromRows([][]any{{1}, {2}, {3}}),
 				)
 				Expect(err).NotTo(HaveOccurred())
-
 				intSpan.End()
 
-				spans := exporter.GetSpans()
-				s := findSpanByName(spans, "Copy")
+				s := findSpanByName(exporter.GetSpans(), "Copy")
 				Expect(s).NotTo(BeNil())
-				Expect(spanEventNames(s)).To(ContainElements("CopyFromStart", "CopyFromEnd"))
-			})
-
-			It("db.sql.table attribute contains sanitized table name", func() {
-				rows := [][]interface{}{{4}}
-				_, err := pool.CopyFrom(
-					intCtx,
-					pgx.Identifier{"pgxotel_copy_test"},
-					[]string{"id"},
-					pgx.CopyFromRows(rows),
-				)
-				Expect(err).NotTo(HaveOccurred())
-
-				intSpan.End()
-
-				spans := exporter.GetSpans()
-				s := findSpanByName(spans, "Copy")
-				Expect(s).NotTo(BeNil())
-				tbl := findAttr(s.Attributes, "db.sql.table")
+				tbl := findAttr(s.Attributes, "db.collection.name")
 				Expect(tbl).NotTo(BeNil())
 				Expect(tbl.Value.AsString()).To(ContainSubstring("pgxotel_copy_test"))
 			})
 		})
 
 		Describe("TraceBatchStart/BatchQuery/BatchEnd", func() {
-			It("creates BatchStart span with BatchEnd event and per-SQL child spans with BatchQuery event", func() {
+			It("creates a BatchStart parent span and per-SQL child spans", func() {
 				batch := &pgx.Batch{}
 				batch.Queue("SELECT 1")
 				batch.Queue("SELECT 2")
@@ -692,27 +549,23 @@ var _ = Describe("pgxotel unit tests", func() {
 				_, err = results.Exec()
 				Expect(err).NotTo(HaveOccurred())
 				Expect(results.Close()).To(Succeed())
-
 				intSpan.End()
 
 				spans := exporter.GetSpans()
+				Expect(findSpanByName(spans, "BatchStart")).NotTo(BeNil())
 
-				batchSpan := findSpanByName(spans, "BatchStart")
-				Expect(batchSpan).NotTo(BeNil())
-				Expect(spanEventNames(batchSpan)).To(ContainElement("BatchEnd"))
-
-				// Each queued SQL should have its own span with BatchQuery event
-				var batchQuerySpans []*tracetest.SpanStub
+				var batchQueryCount int
 				for i := range spans {
-					evts := spanEventNames(&spans[i])
-					for _, e := range evts {
-						if e == "BatchQuery" {
-							batchQuerySpans = append(batchQuerySpans, &spans[i])
-							break
+					if spans[i].Name == "SELECT" {
+						for _, e := range spans[i].Events {
+							if e.Name == "BatchQuery" {
+								batchQueryCount++
+								break
+							}
 						}
 					}
 				}
-				Expect(batchQuerySpans).To(HaveLen(2))
+				Expect(batchQueryCount).To(Equal(2))
 			})
 		})
 	})

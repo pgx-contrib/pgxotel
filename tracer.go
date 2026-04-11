@@ -7,13 +7,14 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"sync"
 
 	pgx "github.com/jackc/pgx/v5"
 	pgconn "github.com/jackc/pgx/v5/pgconn"
 	otel "go.opentelemetry.io/otel"
 	attribute "go.opentelemetry.io/otel/attribute"
 	codes "go.opentelemetry.io/otel/codes"
-	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	trace "go.opentelemetry.io/otel/trace"
 )
 
@@ -25,12 +26,23 @@ var (
 	_ pgx.CopyFromTracer = (*QueryTracer)(nil)
 )
 
-// QueryTracer is a wrapper around the pgx tracer interfaces which instrument queries.
+// QueryTracer instruments pgx with OpenTelemetry tracing.
 type QueryTracer struct {
-	// Name of the tracer
+	// Name is the instrumentation scope name used when creating spans.
 	Name string
-	// Options to provide to the tracer
+	// Options are additional options for the tracer.
 	Options []trace.TracerOption
+	// Provider is the TracerProvider to use. Falls back to the global
+	// provider when nil. The provider is resolved once on first use and
+	// cached for the lifetime of the QueryTracer.
+	Provider trace.TracerProvider
+	// IncludeStatement controls whether the sanitized SQL is recorded as
+	// the db.query.text span attribute. Off by default — enable only when
+	// the SQL content is not considered sensitive in your environment.
+	IncludeStatement bool
+
+	once         sync.Once
+	cachedTracer trace.Tracer
 }
 
 // TraceConnectStart implements pgx.ConnectTracer.
@@ -38,25 +50,13 @@ func (t *QueryTracer) TraceConnectStart(ctx context.Context, data pgx.TraceConne
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
-
-	// attributes
-	attrs := []attribute.KeyValue{}
-	attrs = append(attrs, t.config(data.ConnConfig)...)
-	// prepare the span
-	ctx, span := t.start(ctx, "Connect", attrs)
-	span.AddEvent("ConnectStart")
-	// done!
+	ctx, _ = t.start(ctx, "Connect", t.config(data.ConnConfig))
 	return ctx
 }
 
 // TraceConnectEnd implements pgx.ConnectTracer.
 func (t *QueryTracer) TraceConnectEnd(ctx context.Context, data pgx.TraceConnectEndData) {
-	span := trace.SpanFromContext(ctx)
-	span.AddEvent("ConnectEnd")
-
-	attrs := []attribute.KeyValue{}
-	// done
-	t.stop(span, data.Err, attrs)
+	t.stop(trace.SpanFromContext(ctx), data.Err)
 }
 
 // TracePrepareStart implements pgx.PrepareTracer.
@@ -64,26 +64,17 @@ func (t *QueryTracer) TracePrepareStart(ctx context.Context, conn *pgx.Conn, dat
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
-
-	attrs := []attribute.KeyValue{}
-	attrs = append(attrs, t.config(conn.Config())...)
-	attrs = append(attrs, t.statement(data.SQL))
-
-	// prepare the context
-	ctx, span := t.start(ctx, data.SQL, attrs)
-	span.AddEvent("PrepareStart")
-	// done!
+	attrs := t.config(conn.Config())
+	if kv := t.queryText(data.SQL); kv != nil {
+		attrs = append(attrs, *kv)
+	}
+	ctx, _ = t.start(ctx, spanName(data.SQL), attrs)
 	return ctx
 }
 
 // TracePrepareEnd implements pgx.PrepareTracer.
 func (t *QueryTracer) TracePrepareEnd(ctx context.Context, conn *pgx.Conn, data pgx.TracePrepareEndData) {
-	span := trace.SpanFromContext(ctx)
-	span.AddEvent("PrepareEnd")
-
-	attrs := []attribute.KeyValue{}
-	// done
-	t.stop(span, data.Err, attrs)
+	t.stop(trace.SpanFromContext(ctx), data.Err)
 }
 
 // TraceQueryStart implements pgx.QueryTracer.
@@ -91,25 +82,19 @@ func (t *QueryTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data 
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
-
-	attrs := []attribute.KeyValue{}
-	attrs = append(attrs, t.config(conn.Config())...)
-	attrs = append(attrs, t.statement(data.SQL))
-	// prepare the context
-	ctx, span := t.start(ctx, data.SQL, attrs)
-	span.AddEvent("QueryStart")
-	// done!
+	attrs := t.config(conn.Config())
+	if kv := t.queryText(data.SQL); kv != nil {
+		attrs = append(attrs, *kv)
+	}
+	ctx, _ = t.start(ctx, spanName(data.SQL), attrs)
 	return ctx
 }
 
 // TraceQueryEnd implements pgx.QueryTracer.
 func (t *QueryTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryEndData) {
 	span := trace.SpanFromContext(ctx)
-	span.AddEvent("QueryEnd")
-
-	attrs := []attribute.KeyValue{}
-	// done
-	t.stop(span, data.Err, attrs)
+	span.SetAttributes(t.operationName(data.CommandTag))
+	t.stop(span, data.Err)
 }
 
 // TraceCopyFromStart implements pgx.CopyFromTracer.
@@ -117,27 +102,17 @@ func (t *QueryTracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, da
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
-
-	// attributes
-	attrs := []attribute.KeyValue{}
-	attrs = append(attrs, t.config(conn.Config())...)
+	attrs := t.config(conn.Config())
 	attrs = append(attrs, t.collection(data.TableName))
-	// prepare the context
-	ctx, span := t.start(ctx, "Copy", attrs)
-	span.AddEvent("CopyFromStart")
-	// done!
+	ctx, _ = t.start(ctx, "Copy", attrs)
 	return ctx
 }
 
 // TraceCopyFromEnd implements pgx.CopyFromTracer.
 func (t *QueryTracer) TraceCopyFromEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceCopyFromEndData) {
 	span := trace.SpanFromContext(ctx)
-	span.AddEvent("CopyFromEnd")
-
-	attrs := []attribute.KeyValue{}
-	attrs = append(attrs, t.command(data.CommandTag))
-	// done!
-	t.stop(span, data.Err, attrs)
+	span.SetAttributes(t.operationName(data.CommandTag))
+	t.stop(span, data.Err)
 }
 
 // TraceBatchStart implements pgx.BatchTracer.
@@ -145,96 +120,84 @@ func (t *QueryTracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data 
 	if !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx
 	}
-
-	attrs := []attribute.KeyValue{}
-	attrs = append(attrs, t.config(conn.Config())...)
-	// prepare the context
-	ctx, _ = t.start(ctx, "BatchStart", attrs)
-	// done!
+	ctx, _ = t.start(ctx, "BatchStart", t.config(conn.Config()))
 	return ctx
 }
 
 // TraceBatchQuery implements pgx.BatchTracer.
 func (t *QueryTracer) TraceBatchQuery(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchQueryData) {
-	attrs := []attribute.KeyValue{}
-	attrs = append(attrs, t.config(conn.Config())...)
-	attrs = append(attrs, t.command(data.CommandTag))
-	attrs = append(attrs, t.statement(data.SQL))
-
-	// prepare the context
-	_, span := t.start(ctx, data.SQL, attrs)
-	span.AddEvent("BatchQuery")
-	// done!
-	t.stop(span, data.Err, attrs)
+	attrs := t.config(conn.Config())
+	attrs = append(attrs, t.operationName(data.CommandTag))
+	if kv := t.queryText(data.SQL); kv != nil {
+		attrs = append(attrs, *kv)
+	}
+	_, span := t.start(ctx, spanName(data.SQL), attrs)
+	t.stop(span, data.Err)
 }
 
 // TraceBatchEnd implements pgx.BatchTracer.
 func (t *QueryTracer) TraceBatchEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchEndData) {
-	span := trace.SpanFromContext(ctx)
-	span.AddEvent("BatchEnd")
-
-	attrs := []attribute.KeyValue{}
-	// done
-	t.stop(span, data.Err, attrs)
+	t.stop(trace.SpanFromContext(ctx), data.Err)
 }
 
+// tracer returns the cached Tracer, initialising it on first call.
 func (q *QueryTracer) tracer() trace.Tracer {
-	// get the tracer
-	return otel.GetTracerProvider().Tracer(q.Name, q.Options...)
+	q.once.Do(func() {
+		p := q.Provider
+		if p == nil {
+			p = otel.GetTracerProvider()
+		}
+		q.cachedTracer = p.Tracer(q.Name, q.Options...)
+	})
+	return q.cachedTracer
 }
 
-var pattern = regexp.MustCompile(`^--\s+name:\s+(\w+)`)
+var (
+	namePattern    = regexp.MustCompile(`^--\s+name:\s+(\w+)`)
+	keywordPattern = regexp.MustCompile(`(?i)^\s*(SELECT|INSERT|UPDATE|DELETE|COPY|CALL|EXECUTE|BEGIN|COMMIT|ROLLBACK|CREATE|DROP|ALTER|TRUNCATE|EXPLAIN)\b`)
+)
+
+// spanName returns a low-cardinality span name for a SQL string.
+//
+//   - "-- name: Foo" prefix → "Foo"
+//   - first SQL keyword (SELECT, INSERT, …) → upper-cased keyword
+//   - anything else → "db.query"
+func spanName(sql string) string {
+	if match := namePattern.FindStringSubmatch(sql); len(match) == 2 {
+		return match[1]
+	}
+	if match := keywordPattern.FindStringSubmatch(sanitizeSQL(sql)); len(match) == 2 {
+		return strings.ToUpper(match[1])
+	}
+	return "db.query"
+}
 
 func (q *QueryTracer) start(ctx context.Context, name string, attrs []attribute.KeyValue) (context.Context, trace.Span) {
-	if match := pattern.FindStringSubmatch(name); len(match) == 2 {
-		name = match[1]
-	}
-
-	options := []trace.SpanStartOption{
+	return q.tracer().Start(ctx, name,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attrs...),
-	}
-
-	return q.tracer().Start(ctx, name, options...)
+	)
 }
 
-func (t *QueryTracer) stop(span trace.Span, err error, attrs []attribute.KeyValue) {
+func (t *QueryTracer) stop(span trace.Span, err error) {
 	defer span.End()
-	// set the attributes
-	for _, attr := range attrs {
-		if attr.Valid() {
-			span.SetAttributes(attr)
-		}
-	}
-
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			if !errors.Is(err, pgx.ErrNoRows) {
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-			}
-		}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, pgx.ErrNoRows) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 }
 
 func (t *QueryTracer) config(config *pgx.ConnConfig) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		semconv.DBSystemPostgreSQL,
-		semconv.DBUser(config.User),
-		semconv.DBName(config.Database),
-		semconv.DBConnectionString(t.connection(config)),
+		semconv.DBSystemNamePostgreSQL,
+		semconv.DBNamespace(config.Database),
+		semconv.ServerAddress(config.Host),
+		semconv.ServerPort(int(config.Port)),
 	}
 }
 
-func (t *QueryTracer) connection(config *pgx.ConnConfig) string {
-	conn := config.ConnString()
-	conn = strings.ReplaceAll(conn, config.Password, strings.Repeat("*", len(config.Password)))
-	return conn
-}
-
-func (q *QueryTracer) command(command pgconn.CommandTag) attribute.KeyValue {
+func (q *QueryTracer) operationName(command pgconn.CommandTag) attribute.KeyValue {
 	name := "UNKNOWN"
-
 	switch {
 	case command.Select():
 		name = "SELECT"
@@ -245,44 +208,41 @@ func (q *QueryTracer) command(command pgconn.CommandTag) attribute.KeyValue {
 	case command.Update():
 		name = "UPDATE"
 	}
-
-	return semconv.DBOperation(name)
+	return semconv.DBOperationName(name)
 }
 
 func (t *QueryTracer) collection(name pgx.Identifier) attribute.KeyValue {
-	return semconv.DBSQLTable(name.Sanitize())
+	return semconv.DBCollectionName(name.Sanitize())
 }
 
-func (q *QueryTracer) statement(query string) attribute.KeyValue {
-	reader := strings.NewReader(query)
-	scanner := bufio.NewScanner(reader)
+// queryText returns a db.query.text attribute with the sanitized SQL when
+// IncludeStatement is true, and nil otherwise.
+func (t *QueryTracer) queryText(query string) *attribute.KeyValue {
+	if !t.IncludeStatement {
+		return nil
+	}
+	kv := semconv.DBQueryText(sanitizeSQL(query))
+	return &kv
+}
 
-	builder := &strings.Builder{}
-	// scan the query and fill the builder
+// sanitizeSQL strips SQL comments and collapses the query to a single line.
+func sanitizeSQL(query string) string {
+	scanner := bufio.NewScanner(strings.NewReader(query))
+	var b strings.Builder
 	for scanner.Scan() {
-		text := scanner.Text()
-		text = strings.TrimSpace(text)
-
-		index := strings.Index(text, "--")
-
-		if index == 0 {
+		text := strings.TrimSpace(scanner.Text())
+		if idx := strings.Index(text, "--"); idx == 0 {
+			continue
+		} else if idx > 0 {
+			text = strings.TrimSpace(text[:idx])
+		}
+		if text == "" {
 			continue
 		}
-
-		if index > 0 {
-			text = text[:index]
+		if b.Len() > 0 {
+			b.WriteByte(' ')
 		}
-
-		text = strings.TrimSpace(text)
-
-		if builder.Len() > 0 {
-			builder.WriteString(" ")
-		}
-
-		builder.WriteString(text)
+		b.WriteString(text)
 	}
-
-	statement := builder.String()
-	// done
-	return semconv.DBStatement(statement)
+	return b.String()
 }
