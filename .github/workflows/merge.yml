@@ -7,8 +7,8 @@ permissions: write-all
 
 jobs:
   dependabot:
-    runs-on: ubuntu-latest
     if: ${{ github.actor == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
     steps:
       - name: automerge
         uses: actions/github-script@v9.0.0
