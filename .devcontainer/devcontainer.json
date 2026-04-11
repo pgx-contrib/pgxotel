@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/refs/heads/main/schemas/devContainer.base.schema.json",
+  "name": "pgxotel",
+  "service": "workspace",
+  "dockerComposeFile": "docker-compose.yml",
+  "workspaceFolder": "/home/vscode/workspace",
+  "containerEnv": {
+    "PGX_DATABASE_URL": "postgres://vscode@postgres:5432/pgxotel?sslmode=disable"
+  },
+  "mounts": [
+    "source=${localWorkspaceFolderBasename}-nix,target=/nix,type=volume",
+    "source=${localWorkspaceFolderBasename}-cache,target=/home/vscode/.cache,type=volume"
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/nix:1": {
+      "extraNixConfig": "experimental-features = nix-command flakes"
+    }
+  },
+  "postCreateCommand": "sudo chown -R vscode:vscode /nix /home/vscode/.cache"
+}
