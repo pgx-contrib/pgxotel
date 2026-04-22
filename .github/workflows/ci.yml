@@ -18,16 +18,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Start DevContainer
-        uses: devcontainer-env/devcontainer-ci@v1
-
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v22
 
       - name: Setup Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v13
         with:
-          use-flakehub: false
+          use-flakehub: disabled
+          use-gha-cache: enabled
 
       - name: Run Tests
         run: nix develop --command go tool ginkgo run -r
