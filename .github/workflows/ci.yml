@@ -43,7 +43,7 @@ jobs:
 
       - name: Create Release PR
         id: release
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           manifest-file: .github/config/release-please-manifest.json
           config-file: .github/config/release-please-config.json
