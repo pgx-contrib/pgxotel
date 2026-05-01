@@ -6,27 +6,24 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
     groups:
-      all-actions:
+      all-github-actions:
         patterns: ["*"]
     labels:
       - "dependencies"
-      - "github-actions"
       - "auto-merge"
     commit-message:
       prefix: "chore"
       include: "scope"
-
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
     groups:
-      all-go-deps:
+      all-gomod:
         patterns: ["*"]
     labels:
       - "dependencies"
-      - "go"
       - "auto-merge"
     commit-message:
       prefix: "chore"
