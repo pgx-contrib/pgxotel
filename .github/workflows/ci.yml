@@ -24,6 +24,13 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v23
 
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: ralch
+          # Read only: this repository fetches what the repositories it depends on push.
+          skipPush: true
+
 
       - name: Run Tests
         run: |
